@@ -6,6 +6,7 @@ import { coverFor, deriveTitle, shelfIdFor, SHELVES, timeAgo, titleFor, wordCoun
 import { uploadImage } from '../api.js'
 import NotebookCover from './NotebookCover.jsx'
 import ConfirmDialog from './ConfirmDialog.jsx'
+import DocumentEditor from './DocumentEditor.jsx'
 import FormatBar from './FormatBar.jsx'
 import {
   IconArrowLeft,
@@ -110,6 +111,7 @@ export default function OpenNotebook({
   const diaryCopyRef = useRef(null)
   const bookRef = useRef(null)
   const imageRef = useRef(null)
+  const editorApiRef = useRef(null)
   const pendingSelection = useRef(null)
   const pendingDelete = useRef(false)
   const closeTimer = useRef(0)
@@ -215,7 +217,10 @@ export default function OpenNotebook({
 
   useEffect(() => {
     if ((mode === 'write' || mode === 'text') && stage === 'open') {
-      const timer = window.setTimeout(() => textareaRef.current?.focus(), 80)
+      const timer = window.setTimeout(() => {
+        if (editorApiRef.current) editorApiRef.current.focusFirst()
+        else textareaRef.current?.focus()
+      }, 80)
       return () => window.clearTimeout(timer)
     }
     return undefined
@@ -240,6 +245,10 @@ export default function OpenNotebook({
     if (!pendingSelection.current) return
     const [start, end] = pendingSelection.current
     pendingSelection.current = null
+    if (editorApiRef.current) {
+      editorApiRef.current.setSelection(start, end)
+      return
+    }
     const el = textareaRef.current
     if (!el) return
     el.focus()
@@ -295,11 +304,18 @@ export default function OpenNotebook({
     }
   }, [note.content, note.title, mode, stage])
 
-  const applyInline = (before, after, placeholder) => {
+  const readSelection = () => {
+    const fromEditor = editorApiRef.current?.getSelection()
+    if (fromEditor) return fromEditor
     const el = textareaRef.current
-    if (!el) return
-    const start = el.selectionStart
-    const end = el.selectionEnd
+    if (!el) return null
+    return { start: el.selectionStart, end: el.selectionEnd }
+  }
+
+  const applyInline = (before, after, placeholder) => {
+    const selection = readSelection()
+    if (!selection) return
+    const { start, end } = selection
     const selected = content.slice(start, end) || placeholder
     const next = content.slice(0, start) + before + selected + after + content.slice(end)
     pendingSelection.current = [start + before.length, start + before.length + selected.length]
@@ -307,9 +323,9 @@ export default function OpenNotebook({
   }
 
   const insertBlock = (text, selectAfter = false) => {
-    const el = textareaRef.current
-    if (!el) return
-    const pos = el.selectionEnd
+    const selection = readSelection()
+    if (!selection) return
+    const pos = selection.end
     const before = content.slice(0, pos)
     const after = content.slice(pos).replace(/^\n+/, '')
     const lead = !before ? '' : before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n'
@@ -322,7 +338,7 @@ export default function OpenNotebook({
 
   const addImages = async (files) => {
     const images = Array.from(files ?? []).filter((file) => file.type.startsWith('image/'))
-    if (!images.length || !textareaRef.current) return
+    if (!images.length || !readSelection()) return
 
     for (const file of images) {
       try {
@@ -358,19 +374,18 @@ export default function OpenNotebook({
   }
 
   const applyStyle = (key) => {
-    const el = textareaRef.current
-    if (!el) return
+    const selection = readSelection()
+    if (!selection) return
+    const { start, end } = selection
     if (key === 'rule') {
       insertBlock('---')
       return
     }
     if (key === 'code') {
-      const picked = content.slice(el.selectionStart, el.selectionEnd)
+      const picked = content.slice(start, end)
       insertBlock('```\n' + (picked || 'code') + '\n```')
       return
     }
-    const start = el.selectionStart
-    const end = el.selectionEnd
     const lineStart = content.lastIndexOf('\n', start - 1) + 1
     const lineEndIndex = content.indexOf('\n', end)
     const lineEnd = lineEndIndex === -1 ? content.length : lineEndIndex
@@ -519,6 +534,11 @@ export default function OpenNotebook({
         if (stage !== 'open' || confirmOpen) return
 
         if (mode !== 'read') {
+          if (editorApiRef.current) {
+            event.preventDefault()
+            editorApiRef.current.setSelection(0, content.length)
+            return
+          }
           const editor = textareaRef.current
           if (!editor) return
           event.preventDefault()
@@ -570,7 +590,7 @@ export default function OpenNotebook({
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [confirmOpen, menuOpen, stage, mode, flip, diary, requestClose, turn, onFlush, notify])
+  }, [confirmOpen, menuOpen, stage, mode, flip, diary, content, requestClose, turn, onFlush, notify])
 
   const totalPages = Math.max(1, pages.length)
   const maxSpread = Math.max(0, (isMobile ? pages.length : Math.ceil(pages.length / 2)) - 1)
@@ -804,26 +824,16 @@ export default function OpenNotebook({
 
               <div className="diary-body">
                 {mode === 'write' ? (
-                  <textarea
-                    ref={textareaRef}
-                    className="editor-textarea diary-textarea"
+                  <DocumentEditor
                     value={content}
-                    {...imageHandlers}
-                    onChange={(event) => handleContent(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (!(event.metaKey || event.ctrlKey)) return
-                      const key = event.key.toLowerCase()
-                      if (key === 'b') {
-                        event.preventDefault()
-                        applyInline('**', '**', 'bold text')
-                      } else if (key === 'i') {
-                        event.preventDefault()
-                        applyInline('*', '*', 'italic text')
-                      }
-                    }}
+                    onChange={handleContent}
+                    apiRef={editorApiRef}
+                    imageHandlers={imageHandlers}
+                    onShortcut={(kind) =>
+                      applyInline(...(kind === 'bold' ? ['**', '**', 'bold text'] : ['*', '*', 'italic text']))
+                    }
                     placeholder="Dear diary…"
-                    aria-label="Entry content, Markdown"
-                    spellCheck="true"
+                    label="Entry content, Markdown"
                   />
                 ) : empty ? (
                   <div className="diary-empty">
